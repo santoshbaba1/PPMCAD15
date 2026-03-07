@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jenkins Ecosystem - Architecture & Workflows</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0e17;
+    --bg2: #0f1520;
+    --surface: #141c2b;
+    --border: #1e2a3e;
+    --text: #c8d6e5;
+    --text-dim: #5a6a80;
+    --text-bright: #e8f0fc;
+
+    --jenkins: #d33833;
+    --jenkins-glow: rgba(211,56,51,0.35);
+    --docker: #2496ed;
+    --docker-glow: rgba(36,150,237,0.3);
+    --aws: #ff9900;
+    --aws-glow: rgba(255,153,0,0.3);
+    --github: #8b5cf6;
+    --github-glow: rgba(139,92,246,0.3);
+    --python: #3776ab;
+    --python-glow: rgba(55,118,171,0.3);
+    --agent: #10b981;
+    --agent-glow: rgba(16,185,129,0.3);
+    --vault: #fbbf24;
+    --vault-glow: rgba(251,191,36,0.3);
+    --slack: #e01e5a;
+    --slack-glow: rgba(224,30,90,0.3);
+    --sonar: #4fb3d9;
+    --sonar-glow: rgba(79,179,217,0.3);
+    --artifact: #f472b6;
+    --artifact-glow: rgba(244,114,182,0.3);
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    overflow-x: hidden;
+    min-height: 100vh;
+  }
+
+  /* === HEADER === */
+  .header {
+    text-align: center;
+    padding: 48px 24px 20px;
+    position: relative;
+  }
+  .header h1 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: clamp(1.6rem, 4vw, 2.6rem);
+    font-weight: 700;
+    color: var(--text-bright);
+    letter-spacing: -1px;
+    line-height: 1.2;
+  }
+  .header h1 span { color: var(--jenkins); }
+  .header p {
+    margin-top: 10px;
+    font-size: 0.95rem;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+
+  /* === LEGEND === */
+  .legend {
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+    flex-wrap: wrap;
+    padding: 12px 24px 24px;
+    font-size: 0.75rem;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-dim);
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .legend-line {
+    width: 28px;
+    height: 3px;
+    border-radius: 2px;
+  }
+  .legend-line.trigger { background: var(--github); }
+  .legend-line.orchestrate { background: var(--jenkins); }
+  .legend-line.deploy { background: var(--aws); }
+  .legend-line.secret { background: var(--vault); border-style: dashed; height: 0; border-top: 3px dashed var(--vault); }
+
+  /* === SVG CANVAS === */
+  .diagram-wrapper {
+    position: relative;
+    width: 100%;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 20px 40px;
+  }
+  .diagram-svg {
+    width: 100%;
+    height: auto;
+  }
+
+  /* === NODES === */
+  .node-group { cursor: pointer; }
+  .node-group:hover .node-body { filter: brightness(1.3); }
+  .node-group:hover .node-glow { opacity: 0.7; }
+  .node-body {
+    transition: filter 0.3s ease;
+  }
+  .node-glow {
+    opacity: 0.4;
+    transition: opacity 0.3s ease;
+  }
+  .node-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+    font-size: 12px;
+    fill: var(--text-bright);
+    text-anchor: middle;
+  }
+  .node-sublabel {
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 400;
+    font-size: 9.5px;
+    fill: var(--text-dim);
+    text-anchor: middle;
+  }
+  .node-icon {
+    font-size: 22px;
+    text-anchor: middle;
+    dominant-baseline: central;
+  }
+
+  /* === FLOW CONNECTIONS === */
+  .flow-line {
+    fill: none;
+    stroke-width: 2;
+    opacity: 0.6;
+    transition: opacity 0.3s ease;
+  }
+  .flow-line.animated {
+    stroke-dasharray: 8 4;
+    animation: dashflow 1.2s linear infinite;
+  }
+  .flow-line.dashed {
+    stroke-dasharray: 6 6;
+  }
+  @keyframes dashflow {
+    to { stroke-dashoffset: -24; }
+  }
+
+  /* === FLOW LABELS === */
+  .flow-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8.5px;
+    fill: var(--text-dim);
+  }
+  .flow-label-bg {
+    fill: var(--bg);
+    rx: 3;
+  }
+
+  /* === JENKINS CENTER PULSE === */
+  .jenkins-pulse {
+    animation: pulse 2.5s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { r: 72; opacity: 0.15; }
+    50% { r: 82; opacity: 0.25; }
+  }
+
+  /* === TOOLTIP === */
+  .tooltip-panel {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 24px;
+    max-width: 560px;
+    width: calc(100% - 48px);
+    font-size: 0.85rem;
+    line-height: 1.6;
+    color: var(--text);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease, transform 0.3s ease;
+    transform: translateX(-50%) translateY(10px);
+    z-index: 100;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  .tooltip-panel.visible {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(-50%) translateY(0);
+  }
+  .tooltip-panel h3 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .tooltip-panel .tag {
+    display: inline-block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-right: 6px;
+    margin-bottom: 4px;
+    background: rgba(255,255,255,0.06);
+    color: var(--text-dim);
+  }
+
+  /* === PIPELINE STRIP === */
+  .pipeline-strip {
+    max-width: 1200px;
+    margin: 0 auto 40px;
+    padding: 0 20px;
+  }
+  .pipeline-strip h2 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    text-align: center;
+    margin-bottom: 20px;
+  }
+  .pipeline-flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    flex-wrap: wrap;
+    padding: 0 10px;
+  }
+  .pipeline-stage {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 14px 18px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    min-width: 110px;
+    position: relative;
+    transition: border-color 0.3s, box-shadow 0.3s;
+  }
+  .pipeline-stage:hover {
+    border-color: var(--jenkins);
+    box-shadow: 0 0 20px var(--jenkins-glow);
+  }
+  .pipeline-stage .stage-icon {
+    font-size: 1.3rem;
+    margin-bottom: 6px;
+  }
+  .pipeline-stage .stage-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-bright);
+    text-align: center;
+  }
+  .pipeline-stage .stage-tools {
+    font-size: 0.62rem;
+    color: var(--text-dim);
+    margin-top: 4px;
+    text-align: center;
+  }
+  .pipeline-arrow {
+    color: var(--jenkins);
+    font-size: 1.2rem;
+    padding: 0 4px;
+    opacity: 0.5;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* === FOOTER === */
+  .footer {
+    text-align: center;
+    padding: 20px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    opacity: 0.5;
+  }
+
+  /* === BG GRID === */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(30,42,62,0.3) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(30,42,62,0.3) 1px, transparent 1px);
+    background-size: 60px 60px;
+    pointer-events: none;
+    z-index: -1;
+  }
+
+  /* === ENTRANCE ANIMATIONS === */
+  .node-group {
+    animation: fadeUp 0.6s ease both;
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1><span>Jenkins</span> Ecosystem Architecture</h1>
+  <p>CI / CD Workflows &amp; Dependencies</p>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-line trigger"></div> Trigger / SCM</div>
+  <div class="legend-item"><div class="legend-line orchestrate"></div> Orchestrate</div>
+  <div class="legend-item"><div class="legend-line deploy"></div> Deploy / Infra</div>
+  <div class="legend-item"><div class="legend-line secret"></div> Secrets</div>
+</div>
+
+<div class="diagram-wrapper">
+<svg class="diagram-svg" viewBox="0 0 1000 640" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow-jenkins" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#d33833" stroke-width="1.5"/>
+    </marker>
+    <marker id="arrow-github" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#8b5cf6" stroke-width="1.5"/>
+    </marker>
+    <marker id="arrow-aws" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#ff9900" stroke-width="1.5"/>
+    </marker>
+    <marker id="arrow-docker" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#2496ed" stroke-width="1.5"/>
+    </marker>
+    <marker id="arrow-vault" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#fbbf24" stroke-width="1.5"/>
+    </marker>
+    <marker id="arrow-agent" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#10b981" stroke-width="1.5"/>
+    </marker>
+    <marker id="arrow-slack" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#e01e5a" stroke-width="1.5"/>
+    </marker>
+    <marker id="arrow-sonar" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#4fb3d9" stroke-width="1.5"/>
+    </marker>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- ═══════════ CONNECTIONS ═══════════ -->
+
+  <!-- GitHub → Jenkins (Webhook trigger) -->
+  <path class="flow-line animated" stroke="#8b5cf6" marker-end="url(#arrow-github)"
+    d="M 200,120 C 300,120 350,240 420,275"/>
+  <rect class="flow-label-bg" x="240" y="168" width="80" height="16"/>
+  <text class="flow-label" x="280" y="179" text-anchor="middle">webhook push</text>
+
+  <!-- Jenkins → Agent (dispatch job) -->
+  <path class="flow-line animated" stroke="#d33833" marker-end="url(#arrow-jenkins)"
+    d="M 500,350 C 500,420 350,440 300,460"/>
+  <rect class="flow-label-bg" x="370" y="398" width="72" height="16"/>
+  <text class="flow-label" x="406" y="409" text-anchor="middle">dispatch job</text>
+
+  <!-- Jenkins → Docker (build image) -->
+  <path class="flow-line animated" stroke="#d33833" marker-end="url(#arrow-jenkins)"
+    d="M 560,290 C 640,260 700,200 750,180"/>
+  <rect class="flow-label-bg" x="620" y="222" width="72" height="16"/>
+  <text class="flow-label" x="656" y="233" text-anchor="middle">build image</text>
+
+  <!-- Jenkins → Python (run tests) -->
+  <path class="flow-line animated" stroke="#d33833" marker-end="url(#arrow-jenkins)"
+    d="M 500,350 C 500,430 600,470 680,490"/>
+  <rect class="flow-label-bg" x="546" y="430" width="64" height="16"/>
+  <text class="flow-label" x="578" y="441" text-anchor="middle">run tests</text>
+
+  <!-- Jenkins → AWS (deploy) -->
+  <path class="flow-line animated" stroke="#ff9900" marker-end="url(#arrow-aws)"
+    d="M 560,310 C 650,310 780,320 850,330"/>
+  <rect class="flow-label-bg" x="680" y="298" width="82" height="16"/>
+  <text class="flow-label" x="721" y="309" text-anchor="middle">deploy / push</text>
+
+  <!-- Docker → AWS ECR -->
+  <path class="flow-line animated" stroke="#2496ed" marker-end="url(#arrow-docker)"
+    d="M 820,190 C 870,230 880,280 900,310"/>
+  <rect class="flow-label-bg" x="855" y="248" width="50" height="16"/>
+  <text class="flow-label" x="880" y="259" text-anchor="middle">→ ECR</text>
+
+  <!-- Vault → Jenkins (secrets) -->
+  <path class="flow-line dashed" stroke="#fbbf24" marker-end="url(#arrow-vault)"
+    d="M 180,340 C 260,330 360,310 430,305"/>
+  <rect class="flow-label-bg" x="270" y="310" width="80" height="16"/>
+  <text class="flow-label" x="310" y="321" text-anchor="middle">inject secrets</text>
+
+  <!-- Agent → Docker (run container) -->
+  <path class="flow-line animated" stroke="#10b981" marker-end="url(#arrow-agent)"
+    d="M 300,470 C 400,420 600,320 740,200"/>
+  <rect class="flow-label-bg" x="480" y="336" width="86" height="16"/>
+  <text class="flow-label" x="523" y="347" text-anchor="middle">run in container</text>
+
+  <!-- Jenkins → Slack (notify) -->
+  <path class="flow-line animated" stroke="#e01e5a" marker-end="url(#arrow-slack)"
+    d="M 440,305 C 350,350 220,430 180,510"/>
+  <rect class="flow-label-bg" x="268" y="418" width="50" height="16"/>
+  <text class="flow-label" x="293" y="429" text-anchor="middle">notify</text>
+
+  <!-- Jenkins → SonarQube (scan) -->
+  <path class="flow-line animated" stroke="#4fb3d9" marker-end="url(#arrow-sonar)"
+    d="M 500,260 C 500,190 560,140 620,110"/>
+  <rect class="flow-label-bg" x="520" y="170" width="56" height="16"/>
+  <text class="flow-label" x="548" y="181" text-anchor="middle">scan code</text>
+
+  <!-- Jenkins → Artifacts -->
+  <path class="flow-line animated" stroke="#d33833" marker-end="url(#arrow-jenkins)"
+    d="M 500,350 C 540,430 620,520 680,560"/>
+  <rect class="flow-label-bg" x="558" y="478" width="74" height="16"/>
+  <text class="flow-label" x="595" y="489" text-anchor="middle">archive logs</text>
+
+  <!-- GitHub → Jenkins (Jenkinsfile) -->
+  <path class="flow-line dashed" stroke="#8b5cf6"
+    d="M 170,140 C 250,200 380,260 430,290"/>
+  <rect class="flow-label-bg" x="258" y="212" width="62" height="16"/>
+  <text class="flow-label" x="289" y="223" text-anchor="middle">Jenkinsfile</text>
+
+
+  <!-- ═══════════ NODES ═══════════ -->
+
+  <!-- ★ JENKINS (center) -->
+  <g class="node-group" data-node="jenkins" style="animation-delay:0s" onclick="showTooltip('jenkins')">
+    <circle class="jenkins-pulse" cx="500" cy="305" fill="#d33833" opacity="0.15" r="72"/>
+    <circle class="node-glow" cx="500" cy="305" r="60" fill="none" stroke="#d33833" stroke-width="2" opacity="0.4"/>
+    <circle class="node-body" cx="500" cy="305" r="52" fill="#181e2e" stroke="#d33833" stroke-width="3"/>
+    <text class="node-icon" x="500" y="298">⚙️</text>
+    <text class="node-label" x="500" y="324" style="font-size:13px; fill:#d33833;">JENKINS</text>
+    <text class="node-sublabel" x="500" y="340">Controller</text>
+  </g>
+
+  <!-- GitHub -->
+  <g class="node-group" style="animation-delay:0.1s" onclick="showTooltip('github')">
+    <circle class="node-glow" cx="155" cy="110" r="44" fill="none" stroke="#8b5cf6" stroke-width="1.5" opacity="0.3"/>
+    <circle class="node-body" cx="155" cy="110" r="38" fill="#181e2e" stroke="#8b5cf6" stroke-width="2"/>
+    <text class="node-icon" x="155" y="104">🐙</text>
+    <text class="node-label" x="155" y="124" style="fill:#8b5cf6;">GitHub</text>
+    <text class="node-sublabel" x="155" y="136">SCM + Webhooks</text>
+  </g>
+
+  <!-- Docker -->
+  <g class="node-group" style="animation-delay:0.2s" onclick="showTooltip('docker')">
+    <circle class="node-glow" cx="800" cy="160" r="44" fill="none" stroke="#2496ed" stroke-width="1.5" opacity="0.3"/>
+    <circle class="node-body" cx="800" cy="160" r="38" fill="#181e2e" stroke="#2496ed" stroke-width="2"/>
+    <text class="node-icon" x="800" y="154">🐳</text>
+    <text class="node-label" x="800" y="174" style="fill:#2496ed;">Docker</text>
+    <text class="node-sublabel" x="800" y="186">Build & Runtime</text>
+  </g>
+
+  <!-- AWS -->
+  <g class="node-group" style="animation-delay:0.3s" onclick="showTooltip('aws')">
+    <circle class="node-glow" cx="920" cy="360" r="44" fill="none" stroke="#ff9900" stroke-width="1.5" opacity="0.3"/>
+    <circle class="node-body" cx="920" cy="360" r="38" fill="#181e2e" stroke="#ff9900" stroke-width="2"/>
+    <text class="node-icon" x="920" y="354">☁️</text>
+    <text class="node-label" x="920" y="374" style="fill:#ff9900;">AWS</text>
+    <text class="node-sublabel" x="920" y="386">EC2 · ECR · S3</text>
+  </g>
+
+  <!-- Agent -->
+  <g class="node-group" style="animation-delay:0.15s" onclick="showTooltip('agent')">
+    <circle class="node-glow" cx="250" cy="490" r="44" fill="none" stroke="#10b981" stroke-width="1.5" opacity="0.3"/>
+    <circle class="node-body" cx="250" cy="490" r="38" fill="#181e2e" stroke="#10b981" stroke-width="2"/>
+    <text class="node-icon" x="250" y="484">🖥️</text>
+    <text class="node-label" x="250" y="502" style="fill:#10b981;">Agent</text>
+    <text class="node-sublabel" x="250" y="514">Worker Node</text>
+  </g>
+
+  <!-- Python -->
+  <g class="node-group" style="animation-delay:0.25s" onclick="showTooltip('python')">
+    <circle class="node-glow" cx="740" cy="510" r="44" fill="none" stroke="#3776ab" stroke-width="1.5" opacity="0.3"/>
+    <circle class="node-body" cx="740" cy="510" r="38" fill="#181e2e" stroke="#3776ab" stroke-width="2"/>
+    <text class="node-icon" x="740" y="504">🐍</text>
+    <text class="node-label" x="740" y="522" style="fill:#3776ab;">Python</text>
+    <text class="node-sublabel" x="740" y="534">Tests & Scripts</text>
+  </g>
+
+  <!-- Vault / Credentials -->
+  <g class="node-group" style="animation-delay:0.35s" onclick="showTooltip('vault')">
+    <circle class="node-glow" cx="120" cy="330" r="40" fill="none" stroke="#fbbf24" stroke-width="1.5" opacity="0.3"/>
+    <circle class="node-body" cx="120" cy="330" r="34" fill="#181e2e" stroke="#fbbf24" stroke-width="2"/>
+    <text class="node-icon" x="120" y="324">🔐</text>
+    <text class="node-label" x="120" y="342" style="fill:#fbbf24; font-size:10px;">Credentials</text>
+    <text class="node-sublabel" x="120" y="354">Vault / Secrets</text>
+  </g>
+
+  <!-- Slack -->
+  <g class="node-group" style="animation-delay:0.4s" onclick="showTooltip('slack')">
+    <circle class="node-glow" cx="140" cy="540" r="36" fill="none" stroke="#e01e5a" stroke-width="1.5" opacity="0.3"/>
+    <circle class="node-body" cx="140" cy="540" r="30" fill="#181e2e" stroke="#e01e5a" stroke-width="2"/>
+    <text class="node-icon" x="140" y="536">💬</text>
+    <text class="node-label" x="140" y="552" style="fill:#e01e5a; font-size:10px;">Slack</text>
+    <text class="node-sublabel" x="140" y="564">Notifications</text>
+  </g>
+
+  <!-- SonarQube -->
+  <g class="node-group" style="animation-delay:0.45s" onclick="showTooltip('sonar')">
+    <circle class="node-glow" cx="680" cy="90" r="36" fill="none" stroke="#4fb3d9" stroke-width="1.5" opacity="0.3"/>
+    <circle class="node-body" cx="680" cy="90" r="30" fill="#181e2e" stroke="#4fb3d9" stroke-width="2"/>
+    <text class="node-icon" x="680" y="84">🔍</text>
+    <text class="node-label" x="680" y="100" style="fill:#4fb3d9; font-size:10px;">SonarQube</text>
+    <text class="node-sublabel" x="680" y="112">Code Quality</text>
+  </g>
+
+  <!-- Artifacts / Nexus -->
+  <g class="node-group" style="animation-delay:0.5s" onclick="showTooltip('artifacts')">
+    <circle class="node-glow" cx="730" cy="590" r="36" fill="none" stroke="#f472b6" stroke-width="1.5" opacity="0.3"/>
+    <circle class="node-body" cx="730" cy="590" r="30" fill="#181e2e" stroke="#f472b6" stroke-width="2"/>
+    <text class="node-icon" x="730" y="584">📦</text>
+    <text class="node-label" x="730" y="600" style="fill:#f472b6; font-size:10px;">Artifacts</text>
+    <text class="node-sublabel" x="730" y="612">Nexus / S3</text>
+  </g>
+
+</svg>
+</div>
+
+<!-- ═══════════ PIPELINE STAGES ═══════════ -->
+<div class="pipeline-strip">
+  <h2>▸ Typical Jenkinsfile Pipeline Stages</h2>
+  <div class="pipeline-flow">
+    <div class="pipeline-stage">
+      <div class="stage-icon">📥</div>
+      <div class="stage-name">Checkout</div>
+      <div class="stage-tools">GitHub SCM</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-stage">
+      <div class="stage-icon">🏗️</div>
+      <div class="stage-name">Build</div>
+      <div class="stage-tools">Docker build</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-stage">
+      <div class="stage-icon">🧪</div>
+      <div class="stage-name">Test</div>
+      <div class="stage-tools">pytest / unittest</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-stage">
+      <div class="stage-icon">🔍</div>
+      <div class="stage-name">Scan</div>
+      <div class="stage-tools">SonarQube</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-stage">
+      <div class="stage-icon">📤</div>
+      <div class="stage-name">Push</div>
+      <div class="stage-tools">Docker → ECR</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-stage">
+      <div class="stage-icon">🚀</div>
+      <div class="stage-name">Deploy</div>
+      <div class="stage-tools">AWS EC2 / ECS</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-stage">
+      <div class="stage-icon">💬</div>
+      <div class="stage-name">Notify</div>
+      <div class="stage-tools">Slack / Email</div>
+    </div>
+  </div>
+</div>
+
+<div class="footer">CLICK ANY NODE FOR DETAILS - DESIGNED FOR TEACHING JENKINS CI/CD</div>
+
+<!-- ═══════════ TOOLTIP PANEL ═══════════ -->
+<div class="tooltip-panel" id="tooltip">
+  <h3 id="tt-title"></h3>
+  <div id="tt-tags"></div>
+  <p id="tt-desc" style="margin-top:8px;"></p>
+</div>
+
+<script>
+const data = {
+  jenkins: {
+    title: '⚙️ Jenkins Controller',
+    color: '#d33833',
+    tags: ['Orchestrator', 'Jenkinsfile', 'Plugins', 'Pipelines', 'Credentials Store'],
+    desc: 'The central CI/CD engine. Reads Jenkinsfile from GitHub, dispatches jobs to Agents, orchestrates Docker builds, runs Python test stages, pushes images to AWS ECR, deploys to EC2(VM)/ECS/Kubernetes, and sends notifications. Manages credentials via its built-in credentials store or any external Vault plugin. Every arrow in this diagram flows through Jenkins.'
+  },
+  github: {
+    title: '🐙 GitHub (SCM)',
+    color: '#8b5cf6',
+    tags: ['Webhooks', 'Jenkinsfile', 'PR Triggers', 'Branch Strategy'],
+    desc: 'Source of truth for code and pipeline definitions. A push or Pull Request triggers a webhook to Jenkins, which then checks out the Jenkinsfile and source code.'
+  },
+  docker: {
+    title: '🐳 Docker',
+    color: '#2496ed',
+    tags: ['Dockerfile', 'Build Agent', 'Image Registry', 'Containerized Stages'],
+    desc: 'Used in two ways: (1) Jenkins builds Docker images as pipeline artifacts, then pushes them to AWS ECR / Any other Docker Repo. (2) Jenkins Agents can run each pipeline stage inside Docker containers for isolated, reproducible builds. The Docker Pipeline plugin enables "agent { docker { image \'python:3.11\' } }" syntax.'
+  },
+  aws: {
+    title: '☁️ AWS (Cloud Infra)',
+    color: '#ff9900',
+    tags: ['EC2', 'ECR', 'S3', 'ECS', 'IAM Roles'],
+    desc: 'Deployment target and infrastructure provider. EC2 hosts Jenkins controller & agents. ECR stores Docker images. S3 stores build artifacts and logs. EC2/ECS/EKS runs containerized applications. Jenkins uses IAM credentials (stored in its credential store) for AWS access.'
+  },
+  agent: {
+    title: '🖥️ Jenkins Agent (Worker)',
+    color: '#10b981',
+    tags: ['SSH Agent', 'JNLP', 'Docker Agent', 'Labels', 'Executors'],
+    desc: 'Worker nodes that execute pipeline stages delegated by the Jenkins controller. Can be persistent VMs (EC2) or ephemeral Docker containers. Connected via SSH or JNLP. Labeled (e.g., "linux", "gpu") so pipelines can target specific capabilities. The controller never runs builds itself in production.'
+  },
+  python: {
+    title: '🐍 Python (Tests & Scripts)',
+    color: '#3776ab',
+    tags: ['pytest', 'pip', 'virtualenv', 'Scripted Automation'],
+    desc: 'Used for running test suites (pytest/unittest), build scripts, linting (flake8, black), and deployment automation. Typically runs inside a Docker container on the Agent. Jenkins collects test results via JUnit XML reports and displays them in the build dashboard.'
+  },
+  vault: {
+    title: '🔐 Credentials',
+    color: '#fbbf24',
+    tags: ['Jenkins Credentials', 'Env Vars'],
+    desc: 'Secrets management layer. Jenkins has a built-in credential store for SSH keys, API tokens, and passwords. For more secured usage integratation with external secret management tools like HashiCorp Vault or AWS Secrets Manager via plugins are also possible. Secrets are injected as environment variables using withCredentials() blocks - never hardcoded in Jenkinsfile.'
+  },
+  slack: {
+    title: '💬 Slack (Notifications)',
+    color: '#e01e5a',
+    tags: ['Slack Plugin', 'Post-Build', 'Alerts', 'ChatOps'],
+    desc: 'Receives build status notifications from Jenkins via the Slack Notification plugin. Configured in the "post" block of a Jenkinsfile: success → green message, failure → red alert with build link. Can also enable ChatOps for triggering builds from Slack commands.'
+  },
+  sonar: {
+    title: '🔍 SonarQube (Code Quality)',
+    color: '#4fb3d9',
+    tags: ['Static Analysis', 'Quality Gate', 'Code Coverage', 'Tech Debt'],
+    desc: 'Performs static code analysis during the pipeline. Jenkins runs the SonarQube Scanner, sends results to the SonarQube server, then checks the Quality Gate status. If the gate fails (e.g., coverage < 80%), the pipeline can be configured to abort. Integrates with GitHub PR decorations.'
+  },
+  artifacts: {
+    title: '📦 Artifacts (Nexus / S3)',
+    color: '#f472b6',
+    tags: ['Build Artifacts', 'Test Reports', 'Logs', 'Archival'],
+    desc: 'Build outputs stored for traceability. Jenkins archives JARs, WARs, Docker images, test reports, and logs. Can push to Nexus Repository, Artifactory, or S3. The archiveArtifacts step in Jenkinsfile specifies what to keep. Essential for rollback and audit trails.'
+  }
+};
+
+const tooltip = document.getElementById('tooltip');
+const ttTitle = document.getElementById('tt-title');
+const ttTags = document.getElementById('tt-tags');
+const ttDesc = document.getElementById('tt-desc');
+let activeNode = null;
+
+function showTooltip(key) {
+  const d = data[key];
+  if (!d) return;
+  if (activeNode === key) {
+    tooltip.classList.remove('visible');
+    activeNode = null;
+    return;
+  }
+  activeNode = key;
+  ttTitle.textContent = d.title;
+  ttTitle.style.color = d.color;
+  ttTags.innerHTML = d.tags.map(t => `<span class="tag">${t}</span>`).join('');
+  ttDesc.textContent = d.desc;
+  tooltip.classList.add('visible');
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.node-group') && !e.target.closest('.tooltip-panel')) {
+    tooltip.classList.remove('visible');
+    activeNode = null;
+  }
+});
+</script>
+</body>
+</html>
