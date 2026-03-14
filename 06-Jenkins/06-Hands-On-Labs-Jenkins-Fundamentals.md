@@ -69,6 +69,7 @@ requests==2.31.0
 
 ```dockerfile
 FROM python:3.11-slim
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -246,6 +247,12 @@ Click **Save**
 # Install ngrok if needed
 brew install ngrok  # or download from ngrok.com
 
+# Signup to ngrok using MFA for learning purposes
+Sign up for an account: https://dashboard.ngrok.com/signup
+
+# add your authtoken to the default ngrok.yml
+ngrok config add-authtoken 3AvDxUw9BBMWBmtR0gDvVt8TLi1_2hAeszaUXijnrBJUPJesN
+
 # Expose local Jenkins
 ngrok http 8080
 # Copy the https URL (e.g., https://abc123.ngrok.io)
@@ -259,7 +266,10 @@ ngrok http 8080
 5. Active: ✓
 
 **Configure this in Jenkins:**
-Configure your Jenkins job to use the webhook trigger: In your job/pipeline configuration, under "Build Triggers," check the option "GitHub hook trigger for GITScm polling." This tells Jenkins to start a build whenever it receives a push event from GitHub.
+Configure your Jenkins job to use the webhook trigger: 
+1. In your job/pipeline configuration, under "Build Triggers"
+2. check the option "GitHub hook trigger for GITScm polling." 
+This tells Jenkins to start a build whenever it receives a push event from GitHub.
 
 **Test it:** Make a small change to your repo, push it, and watch Jenkins auto-trigger a build.
 
@@ -470,10 +480,10 @@ pipeline {
         stage('Smoke Test Container') {
             steps {
                 sh '''
-                    CONTAINER_ID=$(docker run -d -p 9090:8080 cicd-lab-app:latest)
+                    CONTAINER_ID=$(docker run -d cicd-lab-app:latest)
                     sleep 5
 
-                    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:9090/health)
+                    HTTP_CODE=$(docker exec $CONTAINER_ID curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health)
 
                     docker stop $CONTAINER_ID
                     docker rm $CONTAINER_ID

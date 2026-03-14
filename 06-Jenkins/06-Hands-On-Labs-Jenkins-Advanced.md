@@ -76,128 +76,119 @@ pipeline {
     agent any
 
     options {
-        buildDiscarder(logRotator(numToKeepStr: '20'))
+        buildDiscarder(logRotator(numToKeepStr: '10'))
         timeout(time: 30, unit: 'MINUTES')
         disableConcurrentBuilds()
         timestamps()
     }
 
     environment {
-        AWS_REGION         = 'us-east-1'
-        ECR_REPO_URI       = credentials('ecr-repo-uri')
-        ECS_CLUSTER        = 'cicd-training-cluster'
-        ECS_SERVICE        = 'lab-app-service'
-        TASK_FAMILY        = 'lab-app-task'
-        CONTAINER_NAME     = 'lab-app'
-        IMAGE_TAG          = "${env.BUILD_NUMBER}-${env.GIT_COMMIT?.take(8)}"
+        APP_NAME       = 'cicd-lab-app'
+        AWS_REGION     = 'us-east-1'
+        ECR_REPO_URI   = credentials('ecr-repo-uri')
+        ECS_CLUSTER    = 'cicd-training-cluster'
+        ECS_SERVICE    = 'lab-app-service'
+        TASK_FAMILY    = 'lab-app-task'
     }
 
     stages {
-        stage('Checkout & Validate') {
+        stage('Checkout') {
             steps {
-                script {
-                    echo "============================================"
-                    echo " CI/CD PIPELINE: ${env.JOB_NAME}"
-                    echo " Build:   #${env.BUILD_NUMBER}"
-                    echo " Branch:  ${env.GIT_BRANCH}"
-                    echo " Commit:  ${env.GIT_COMMIT?.take(8)}"
-                    echo " Image:   ${env.IMAGE_TAG}"
-                    echo "============================================"
-                }
-                // Ensure Dockerfile exists
-                sh 'test -f Dockerfile || (echo "Dockerfile not found!" && exit 1)'
-                sh 'test -f requirements.txt || (echo "requirements.txt not found!" && exit 1)'
+                echo "=========================================="
+                echo " Building: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+                echo " Branch:   ${env.GIT_BRANCH}"
+                echo " Commit:   ${env.GIT_COMMIT?.take(8)}"
+                echo "=========================================="
+                sh 'git log --oneline -5'
             }
         }
 
-        stage('Install & Test') {
-            agent {
-                docker {
-                    image 'python:3.11-slim'
-                    reuseNode true
-                }
-            }
+        stage('Install Dependencies') {
             steps {
-                sh 'pip install -r requirements.txt --quiet'
-                sh 'python -m pytest tests/ -v --junitxml=test-results.xml'
+                sh '''
+                    pip install --quiet --break-system-packages -r requirements.txt
+                    pip list | grep -E "Flask|pytest|requests"
+                '''
             }
-            post {
-                always { junit 'test-results.xml' }
+        }
+
+        stage('Quality Checks') {
+            parallel {
+                stage('Unit Tests') {
+                    steps {
+                        sh 'python3 -m pytest tests/ -v --tb=short --junitxml=test-results.xml'
+                    }
+                    post {
+                        always {
+                            junit 'test-results.xml'
+                        }
+                    }
+                }
+                stage('Syntax Check') {
+                    steps {
+                        sh '''
+                            python3 -m py_compile app.py
+                            echo "Syntax check passed"
+                        '''
+                    }
+                }
             }
         }
 
         stage('Build Docker Image') {
             steps {
                 script {
+                    env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT?.take(8)}"
+
                     sh """
                         docker build \
-                            --build-arg APP_VERSION=${env.IMAGE_TAG} \
-                            --label "git.commit=${env.GIT_COMMIT}" \
-                            --label "build.number=${env.BUILD_NUMBER}" \
-                            --label "build.date=\$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                            -t ${env.CONTAINER_NAME}:${env.IMAGE_TAG} \
+                            --build-arg BUILD_DATE=\$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+                            --build-arg VERSION=${env.IMAGE_TAG} \
+                            -t ${APP_NAME}:${env.IMAGE_TAG} \
+                            -t ${APP_NAME}:latest \
                             .
                     """
-                    echo "Built: ${env.CONTAINER_NAME}:${env.IMAGE_TAG}"
+
+                    echo "Image built: ${APP_NAME}:${env.IMAGE_TAG}"
                 }
             }
         }
 
-        stage('Security Scan') {
+        stage('Smoke Test Container') {
             steps {
                 sh '''
-                    # Check if trivy is installed, install if not
-                    command -v trivy || {
-                        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-                          | sh -s -- -b /usr/local/bin latest
-                    }
-                    
-                    trivy image \
-                        --severity HIGH,CRITICAL \
-                        --exit-code 0 \
-                        --no-progress \
-                        --format table \
-                        ''' + env.CONTAINER_NAME + ':' + env.IMAGE_TAG + '''
-                    
-                    echo "Security scan complete"
+                    CONTAINER_ID=$(docker run -d cicd-lab-app:latest)
+                    sleep 5
+
+                    HTTP_CODE=$(docker exec $CONTAINER_ID curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health)
+
+                    docker stop $CONTAINER_ID
+                    docker rm $CONTAINER_ID
+
+                    if [ "$HTTP_CODE" != "200" ]; then
+                        echo "Smoke test FAILED - HTTP $HTTP_CODE"
+                        exit 1
+                    fi
+                    echo "Smoke test PASSED - HTTP $HTTP_CODE"
                 '''
             }
         }
 
         stage('Push to ECR') {
             steps {
-                withAWS(region: "${env.AWS_REGION}", credentials: 'aws-ecr-credentials') {
-                    script {
-                        // Get account ID
-                        def accountId = sh(
-                            script: 'aws sts get-caller-identity --query Account --output text',
-                            returnStdout: true
-                        ).trim()
+                withAWS(region: "${AWS_REGION}", credentials: 'aws-ecr-credentials') {
+                    sh """
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                            docker login --username AWS --password-stdin ${ECR_REPO_URI}
 
-                        // Authenticate Docker to ECR
-                        sh """
-                            aws ecr get-login-password --region ${env.AWS_REGION} | \
-                                docker login --username AWS \
-                                --password-stdin ${accountId}.dkr.ecr.${env.AWS_REGION}.amazonaws.com
-                        """
+                        docker tag ${APP_NAME}:${env.IMAGE_TAG} ${ECR_REPO_URI}:${env.IMAGE_TAG}
+                        docker tag ${APP_NAME}:${env.IMAGE_TAG} ${ECR_REPO_URI}:latest
 
-                        // Tag for ECR
-                        sh """
-                            docker tag ${env.CONTAINER_NAME}:${env.IMAGE_TAG} \
-                                ${env.ECR_REPO_URI}:${env.IMAGE_TAG}
-                            docker tag ${env.CONTAINER_NAME}:${env.IMAGE_TAG} \
-                                ${env.ECR_REPO_URI}:latest
-                        """
+                        docker push ${ECR_REPO_URI}:${env.IMAGE_TAG}
+                        docker push ${ECR_REPO_URI}:latest
+                    """
 
-                        // Push both tags
-                        sh """
-                            docker push ${env.ECR_REPO_URI}:${env.IMAGE_TAG}
-                            docker push ${env.ECR_REPO_URI}:latest
-                        """
-
-                        echo "Pushed: ${env.ECR_REPO_URI}:${env.IMAGE_TAG}"
-                        echo "Pushed: ${env.ECR_REPO_URI}:latest"
-                    }
+                    echo "Pushed: ${ECR_REPO_URI}:${env.IMAGE_TAG}"
                 }
             }
         }
@@ -207,105 +198,21 @@ pipeline {
                 branch 'main'
             }
             steps {
-                withAWS(region: "${env.AWS_REGION}", credentials: 'aws-ecr-credentials') {
-                    script {
-                        echo "Fetching current task definition..."
-                        
-                        // Get current task definition
-                        def taskDefJson = sh(
-                            script: """
-                                aws ecs describe-task-definition \
-                                    --task-definition ${env.TASK_FAMILY} \
-                                    --query 'taskDefinition' \
-                                    --output json
-                            """,
-                            returnStdout: true
-                        ).trim()
+                withAWS(region: "${AWS_REGION}", credentials: 'aws-ecr-credentials') {
+                    sh """
+                        aws ecs update-service \
+                            --cluster ${ECS_CLUSTER} \
+                            --service ${ECS_SERVICE} \
+                            --force-new-deployment
 
-                        // Update image in task definition
-                        def updatedTaskDef = sh(
-                            script: """
-                                echo '${taskDefJson}' | python3 -c "
-import json, sys
-td = json.load(sys.stdin)
-for cd in td['containerDefinitions']:
-    if cd['name'] == '${env.CONTAINER_NAME}':
-        cd['image'] = '${env.ECR_REPO_URI}:${env.IMAGE_TAG}'
-# Remove fields that can't be in registration request
-for field in ['taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy']:
-    td.pop(field, None)
-print(json.dumps(td))
-"
-                            """,
-                            returnStdout: true
-                        ).trim()
+                        echo "Waiting for service to stabilize..."
 
-                        // Register new task definition
-                        def newTaskDefArn = sh(
-                            script: """
-                                echo '${updatedTaskDef}' | aws ecs register-task-definition \
-                                    --cli-input-json file:///dev/stdin \
-                                    --query 'taskDefinition.taskDefinitionArn' \
-                                    --output text
-                            """,
-                            returnStdout: true
-                        ).trim()
+                        aws ecs wait services-stable \
+                            --cluster ${ECS_CLUSTER} \
+                            --services ${ECS_SERVICE}
+                    """
 
-                        echo "New task definition: ${newTaskDefArn}"
-
-                        // Update ECS service
-                        sh """
-                            aws ecs update-service \
-                                --cluster ${env.ECS_CLUSTER} \
-                                --service ${env.ECS_SERVICE} \
-                                --task-definition ${newTaskDefArn} \
-                                --force-new-deployment \
-                                --region ${env.AWS_REGION}
-                        """
-
-                        echo "Deployment triggered. Waiting for service to stabilize..."
-
-                        // Wait for service to be stable (max 10 minutes)
-                        sh """
-                            aws ecs wait services-stable \
-                                --cluster ${env.ECS_CLUSTER} \
-                                --services ${env.ECS_SERVICE} \
-                                --region ${env.AWS_REGION}
-                        """
-
-                        echo "Deployment complete! Service is stable."
-                    }
-                }
-            }
-        }
-
-        stage('Deployment Verification') {
-            when {
-                branch 'main'
-            }
-            steps {
-                withAWS(region: "${env.AWS_REGION}", credentials: 'aws-ecr-credentials') {
-                    script {
-                        // Get running tasks count
-                        def runningCount = sh(
-                            script: """
-                                aws ecs describe-services \
-                                    --cluster ${env.ECS_CLUSTER} \
-                                    --services ${env.ECS_SERVICE} \
-                                    --query 'services[0].runningCount' \
-                                    --output text
-                            """,
-                            returnStdout: true
-                        ).trim()
-
-                        echo "Running tasks: ${runningCount}"
-
-                        if (runningCount.toInteger() == 0) {
-                            error("Deployment failed - no running tasks!")
-                        }
-
-                        echo "Verification passed! ${runningCount} tasks running."
-                    }
+                    echo "Deployment complete!"
                 }
             }
         }
@@ -313,18 +220,15 @@ print(json.dumps(td))
 
     post {
         always {
-            // Clean up local Docker images to save disk
-            sh '''
-                docker rmi $(docker images -q --filter "dangling=true") 2>/dev/null || true
-            '''
+            echo "Pipeline completed - Status: ${currentBuild.currentResult}"
+            sh 'docker rmi $(docker images -q --filter "dangling=true") 2>/dev/null || true'
+            cleanWs()
         }
         success {
-            echo "DEPLOYED SUCCESSFULLY: ${env.ECR_REPO_URI}:${env.IMAGE_TAG}"
+            echo "Build PASSED! Image: ${ECR_REPO_URI}:${env.IMAGE_TAG}"
         }
         failure {
-            echo "DEPLOYMENT FAILED - Image: ${env.IMAGE_TAG}"
-            // Rollback hint
-            echo "To rollback: aws ecs update-service --cluster ${env.ECS_CLUSTER} --service ${env.ECS_SERVICE} --task-definition <PREVIOUS_TASK_DEF>"
+            echo "Build FAILED! Check logs above."
         }
     }
 }
@@ -369,13 +273,13 @@ aws ecs describe-tasks \
 ## Lab 2 - Jenkins Shared Libraries (DRY Pipelines)
 ## ════════════════════════════════════════════════
 
-**Objective:** Create a Jenkins Shared Library that encapsulates Docker build, ECR push, and ECS deploy logic. Consume it from a slim Jenkinsfile.
+**Objective:** Understand how Jenkins Shared Libraries work by extracting reusable steps from the Jenkinsfile you already have.
 
 ### What You'll Learn
 - Shared Library directory structure
-- Writing `vars/` global variables (DSL steps)
-- Loading libraries in Jenkinsfiles with `@Library`
-- The DRY principle at pipeline scale
+- Writing vars/ global variables (custom pipeline steps)
+- Loading libraries in Jenkinsfiles with @Library
+- The DRY principle: write once, use everywhere
 
 ---
 
@@ -386,155 +290,66 @@ Create a new GitHub repo: `jenkins-shared-lib`
 ```bash
 mkdir jenkins-shared-lib && cd jenkins-shared-lib
 git init
+mkdir -p vars
+```
 
-mkdir -p vars src/com/company resources
+**`vars/buildInfo.groovy`:**
+```groovy
+def call() {
+    echo "=========================================="
+    echo " Building: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+    echo " Branch:   ${env.GIT_BRANCH}"
+    echo " Commit:   ${env.GIT_COMMIT?.take(8)}"
+    echo "=========================================="
+    sh 'git log --oneline -5'
+}
 ```
 
 **`vars/dockerBuild.groovy`:**
 ```groovy
 def call(Map config = [:]) {
-    def imageName  = config.imageName  ?: error("dockerBuild: imageName is required")
-    def imageTag   = config.imageTag   ?: env.BUILD_NUMBER
-    def dockerfile = config.dockerfile ?: 'Dockerfile'
-    def buildArgs  = config.buildArgs  ?: ''
+    def imageName = config.imageName ?: error("dockerBuild: imageName is required")
+    def imageTag  = config.imageTag  ?: env.BUILD_NUMBER
 
     sh """
         docker build \
-            ${buildArgs} \
-            --label "git.commit=${env.GIT_COMMIT}" \
-            --label "build.number=${env.BUILD_NUMBER}" \
-            -f ${dockerfile} \
+            --build-arg BUILD_DATE=\$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            --build-arg VERSION=${imageTag} \
             -t ${imageName}:${imageTag} \
             -t ${imageName}:latest \
             .
     """
-    echo "Built: ${imageName}:${imageTag}"
-    return "${imageName}:${imageTag}"
+
+    echo "Image built: ${imageName}:${imageTag}"
 }
 ```
 
-**`vars/ecrPush.groovy`:**
+**`vars/smokeTest.groovy`:**
 ```groovy
 def call(Map config = [:]) {
-    def imageName    = config.imageName    ?: error("ecrPush: imageName is required")
-    def imageTag     = config.imageTag     ?: env.BUILD_NUMBER
-    def ecrRepoUri   = config.ecrRepoUri   ?: error("ecrPush: ecrRepoUri is required")
-    def awsRegion    = config.awsRegion    ?: 'us-east-1'
-    def awsCredId    = config.awsCredId    ?: 'aws-ecr-credentials'
-
-    withAWS(region: awsRegion, credentials: awsCredId) {
-        def registryUrl = ecrRepoUri.split('/')[0]
-
-        sh """
-            aws ecr get-login-password --region ${awsRegion} | \
-                docker login --username AWS --password-stdin ${registryUrl}
-
-            docker tag ${imageName}:${imageTag} ${ecrRepoUri}:${imageTag}
-            docker tag ${imageName}:${imageTag} ${ecrRepoUri}:latest
-
-            docker push ${ecrRepoUri}:${imageTag}
-            docker push ${ecrRepoUri}:latest
-        """
-        echo "Pushed: ${ecrRepoUri}:${imageTag}"
-    }
-}
-```
-
-**`vars/ecsDeploy.groovy`:**
-```groovy
-def call(Map config = [:]) {
-    def cluster      = config.cluster      ?: error("ecsDeploy: cluster is required")
-    def service      = config.service      ?: error("ecsDeploy: service is required")
-    def taskFamily   = config.taskFamily   ?: error("ecsDeploy: taskFamily is required")
-    def containerName = config.containerName ?: 'app'
-    def imageUri     = config.imageUri     ?: error("ecsDeploy: imageUri is required")
-    def awsRegion    = config.awsRegion    ?: 'us-east-1'
-    def awsCredId    = config.awsCredId    ?: 'aws-ecr-credentials'
-    def waitStable   = config.waitStable   != null ? config.waitStable : true
-
-    withAWS(region: awsRegion, credentials: awsCredId) {
-        script {
-            // Update task definition with new image
-            def taskDefJson = sh(
-                script: "aws ecs describe-task-definition --task-definition ${taskFamily} --query taskDefinition --output json",
-                returnStdout: true
-            ).trim()
-
-            def newTaskDef = sh(
-                script: """
-                    echo '${taskDefJson}' | python3 -c "
-import json, sys
-td = json.load(sys.stdin)
-for cd in td['containerDefinitions']:
-    if cd['name'] == '${containerName}':
-        cd['image'] = '${imageUri}'
-for f in ['taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy']:
-    td.pop(f, None)
-print(json.dumps(td))
-"
-                """,
-                returnStdout: true
-            ).trim()
-
-            def newArn = sh(
-                script: "echo '${newTaskDef}' | aws ecs register-task-definition --cli-input-json file:///dev/stdin --query taskDefinition.taskDefinitionArn --output text",
-                returnStdout: true
-            ).trim()
-
-            sh """
-                aws ecs update-service \
-                    --cluster ${cluster} \
-                    --service ${service} \
-                    --task-definition ${newArn} \
-                    --force-new-deployment
-            """
-
-            if (waitStable) {
-                echo "Waiting for service to stabilize..."
-                sh "aws ecs wait services-stable --cluster ${cluster} --services ${service}"
-                echo "Deployment stable!"
-            }
-        }
-    }
-}
-```
-
-**`vars/trivyScan.groovy`:**
-```groovy
-def call(Map config = [:]) {
-    def imageName  = config.imageName  ?: error("trivyScan: imageName is required")
-    def imageTag   = config.imageTag   ?: 'latest'
-    def severity   = config.severity   ?: 'HIGH,CRITICAL'
-    def failBuild  = config.failBuild  != null ? config.failBuild : false
+    def imageName = config.imageName ?: error("smokeTest: imageName is required")
+    def imageTag  = config.imageTag  ?: 'latest'
+    def endpoint  = config.endpoint  ?: '/health'
+    def port      = config.port      ?: '8080'
 
     sh """
-        command -v trivy || {
-            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-                | sh -s -- -b /usr/local/bin latest
-        }
-        trivy image \
-            --severity ${severity} \
-            --exit-code ${failBuild ? 1 : 0} \
-            --no-progress \
-            --format table \
-            ${imageName}:${imageTag}
+        CONTAINER_ID=\$(docker run -d ${imageName}:${imageTag})
+        sleep 5
+
+        HTTP_CODE=\$(docker exec \$CONTAINER_ID curl -s -o /dev/null -w "%{http_code}" http://localhost:${port}${endpoint})
+
+        docker stop \$CONTAINER_ID
+        docker rm \$CONTAINER_ID
+
+        if [ "\$HTTP_CODE" != "200" ]; then
+            echo "Smoke test FAILED - HTTP \$HTTP_CODE"
+            exit 1
+        fi
+        echo "Smoke test PASSED - HTTP \$HTTP_CODE"
     """
 }
 ```
 
-**`vars/runTests.groovy`:**
-```groovy
-def call(Map config = [:]) {
-    def pythonImage = config.pythonImage ?: 'python:3.11-slim'
-    def testCommand = config.testCommand ?: 'python -m pytest tests/ -v --junitxml=test-results.xml'
-
-    docker.image(pythonImage).inside {
-        sh 'pip install -r requirements.txt --quiet'
-        sh testCommand
-    }
-    junit 'test-results.xml'
-}
-```
 
 ```bash
 cd jenkins-shared-lib
@@ -567,69 +382,109 @@ Create `Jenkinsfile.shared-lib` in your app repo:
 pipeline {
     agent any
 
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 20, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        timestamps()
+    }
+
     environment {
-        ECR_REPO_URI = credentials('ecr-repo-uri')
-        IMAGE_NAME   = 'cicd-lab-app'
-        IMAGE_TAG    = "${env.BUILD_NUMBER}-${env.GIT_COMMIT?.take(8)}"
-        ECS_CLUSTER  = 'cicd-training-cluster'
-        ECS_SERVICE  = 'lab-app-service'
+        APP_NAME = 'cicd-lab-app'
     }
 
     stages {
-        stage('Test') {
+        stage('Checkout') {
             steps {
-                runTests(pythonImage: 'python:3.11-slim')
+                buildInfo()
             }
         }
 
-        stage('Build') {
+        stage('Install Dependencies') {
             steps {
-                dockerBuild(imageName: env.IMAGE_NAME, imageTag: env.IMAGE_TAG)
+                sh '''
+                    pip install --quiet --break-system-packages -r requirements.txt
+                    pip list | grep -E "Flask|pytest|requests"
+                '''
             }
         }
 
-        stage('Scan') {
-            steps {
-                trivyScan(imageName: env.IMAGE_NAME, imageTag: env.IMAGE_TAG, failBuild: false)
+        stage('Quality Checks') {
+            parallel {
+                stage('Unit Tests') {
+                    steps {
+                        sh 'python3 -m pytest tests/ -v --tb=short --junitxml=test-results.xml'
+                    }
+                    post {
+                        always {
+                            junit 'test-results.xml'
+                        }
+                    }
+                }
+                stage('Syntax Check') {
+                    steps {
+                        sh '''
+                            python3 -m py_compile app.py
+                            echo "Syntax check passed"
+                        '''
+                    }
+                }
             }
         }
 
-        stage('Push') {
+        stage('Build Docker Image') {
             steps {
-                ecrPush(
-                    imageName:  env.IMAGE_NAME,
-                    imageTag:   env.IMAGE_TAG,
-                    ecrRepoUri: env.ECR_REPO_URI
-                )
+                script {
+                    env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT?.take(8)}"
+                    dockerBuild(imageName: env.APP_NAME, imageTag: env.IMAGE_TAG)
+                }
             }
         }
 
-        stage('Deploy') {
-            when { branch 'main' }
+        stage('Smoke Test Container') {
             steps {
-                ecsDeploy(
-                    cluster:       env.ECS_CLUSTER,
-                    service:       env.ECS_SERVICE,
-                    taskFamily:    'lab-app-task',
-                    containerName: 'lab-app',
-                    imageUri:      "${env.ECR_REPO_URI}:${env.IMAGE_TAG}"
-                )
+                smokeTest(imageName: env.APP_NAME, imageTag: 'latest')
             }
+        }
+    }
+
+    post {
+        always {
+            echo "Pipeline completed - Status: ${currentBuild.currentResult}"
+            cleanWs()
+        }
+        success {
+            echo "Build PASSED! Image: ${env.APP_NAME}:${env.IMAGE_TAG}"
+        }
+        failure {
+            echo "Build FAILED! Check logs above."
         }
     }
 }
 ```
 
-Notice how the full pipeline is now ~50 lines of clean, readable Groovy. The complexity lives in the shared library, tested once and used everywhere.
+Notice: buildInfo(), dockerBuild(...), and smokeTest(...) are now single-line calls. The implementation lives in the shared library, if you need to change how Docker builds work across 10 pipelines, you change it in one place.
 
-### Step 4: Test a Library Change
+### Step 4: Create a New Pipeline Job
 
-1. Update `vars/trivyScan.groovy` to add `--format json` output
-2. Push to `jenkins-shared-lib`
-3. Re-run the pipeline - all pipelines using this library get the update automatically
+1. From Jenkins dashboard, click New Item
+2. Name: pipeline-shared-lib
+3. Select Pipeline → Click OK
+4. Under Pipeline:
+    Definition: Pipeline script from SCM
+    SCM: Git
+    Repository URL: https://github.com/YOUR_USERNAME/cicd-labs.git
+    Script Path: Jenkinsfile.shared-lib
+5. Click Save → Build Now
+
+### Step 5: Verify the Library is Loading
+In the console output of your build, you should see this near the top:
+Loading library jenkins-shared-lib@main
+ > git rev-parse --resolve-git-dir /var/jenkins_home/...
+ ...
 
 ### ✅ Lab 2 Success Criteria
-- Shared library repo created with 5 `vars/` files
+- Shared library repo created with 3 `vars/` files
 - Library registered in Jenkins global settings
 - Slim Jenkinsfile runs successfully using library functions
 - Console shows the library being loaded from GitHub

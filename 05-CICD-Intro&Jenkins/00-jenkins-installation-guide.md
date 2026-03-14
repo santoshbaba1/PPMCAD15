@@ -27,25 +27,31 @@ Jenkins requires **Java (JDK 17)**. Choose the method that matches your environm
 
 *Best for keeping your host machine clean. Works identically on Windows, macOS, and Linux.*
 
+This setup uses **Docker-in-Docker (DinD)** - Jenkins gets its own isolated Docker daemon instead of sharing the host's. This is cleaner and closer to how production CI/CD environments work.
+
+**Step 1: Create a project folder and add these two files:**
 ```bash
-# Step 1: Create a named volume so data survives container restarts
-docker volume create jenkins_data
-
-# Step 2: Run Jenkins
-docker run -d --name jenkins -p 8080:8080 -p 50000:50000 -v jenkins_data:/var/jenkins_home -v /var/run/docker.sock:/var/run/docker.sock -v $(which docker):/usr/bin/docker --restart unless-stopped jenkins/jenkins:lts-jdk17 && docker exec -u root jenkins chmod 666 /var/run/docker.sock
-
-echo "Jenkins is starting..."
+mkdir jenkins-setup && cd jenkins-setup
 ```
 
-> **Why mount Docker socket?** We mount `/var/run/docker.sock` so Jenkins can run Docker commands from inside the container. This is how we'll build Docker images in later labs. Without this, Jenkins cannot "spawn" other containers.
+Copy **`Dockerfile-Jenkins`** from the current folder
+Copy **`docker-compose-Jenkins.yml`** from the current folder
 
-> **Why port 50000?** This is the JNLP port used for agent communication. When Jenkins agents (workers) connect back to the controller, they use this port.
-
-**Wait ~60 seconds for Jenkins to fully start:**
-
+**Step 2: Build and start**
 ```bash
-# Watch logs until you see "Jenkins is fully up and running"
-docker logs -f jenkins 2>&1 | grep -m1 "Jenkins is fully up"
+docker compose -f docker-compose-Jenkins.yml up -d --build
+```
+
+**Step 3: Wait ~60 seconds, then verify:**
+```bash
+docker compose -f docker-compose-Jenkins.yml logs -f jenkins"
+```
+
+> **Why DinD?** Instead of sharing the host's Docker daemon (socket mount), Jenkins gets its own isolated Docker daemon running in a separate container. This means builds can't accidentally affect your host, and it mirrors how production CI environments work. The two containers communicate securely over TLS.
+
+> **Why `--privileged`?** The DinD container needs it to run a Docker daemon inside a container. This is scoped to the DinD container only - Jenkins itself runs unprivileged.
+
+> **Why port 50000?** This is the JNLP port used for agent communication. When Jenkins agents connect back to the controller, they use this port.
 ```
 
 ### Option B: Linux (Ubuntu/Debian - Native)
@@ -264,10 +270,10 @@ By mounting the Docker socket, we give Jenkins access to the **host machine's Do
 ┌────────────────────────────────────────────────┐
 │           Your Machine (Host)                  │
 │                                                │
-│   ┌─────────────────┐                          │
+│   ┌───────────────────┐                        │
 │   │ Jenkins Controller│──── docker.sock ──┐    │
-│   │   (container)    │                    │    │
-│   └─────────────────┘                     │    │
+│   │   (container)     │                   │    │
+│   └───────────────────┘                   │    │
 │                                           ▼    │
 │                               Docker Daemon    │
 │                                      │         │
