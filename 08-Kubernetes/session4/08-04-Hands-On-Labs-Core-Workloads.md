@@ -185,6 +185,11 @@ web-app-xyz1a2b3c-def45   1/1     Running   0          30s
 web-app-xyz1a2b3c-ghi78   1/1     Running   0          30s
 ```
 
+6. Port Forward and test locally
+```bash
+kubectl port-forward deploy/web-app 8090:80
+```
+
 ### Success Criteria
 - [ ] Deployment shows READY=3/3
 - [ ] Exactly 1 ReplicaSet exists (the active one)
